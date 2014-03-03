@@ -16,11 +16,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from collections import defaultdict
-from random import choice
+from collections import defaultdict, Counter
+from random import choice, randint
+import re
 import shelve
 
-DEFAULT_IGNORE_CHARS = '!"&`()*,./:;<=>?[\\]^=\'{|}~',
+DEFAULT_IGNORE_CHARS = '\\]\\-!"&`()*,./:;<=>?[\\^=\'{|}~'
 
 class Markov(object):
     """tev's Markov chain implementation"""
@@ -34,10 +35,10 @@ class Markov(object):
         self.default_max_left_line_breaks = None
         self.default_max_right_line_breaks = None
 
-        self.word_forward = defaultdict(list)
-        self.chain_forward = defaultdict(list)
-        self.word_backward = defaultdict(list)
-        self.chain_backward = defaultdict(list)
+        self.word_forward = defaultdict(Counter)
+        self.chain_forward = defaultdict(Counter)
+        self.word_backward = defaultdict(Counter)
+        self.chain_backward = defaultdict(Counter)
 
     def get_order(self):
         """Retrieve order of Markov chain"""
@@ -47,17 +48,21 @@ class Markov(object):
         """Convert a string or sequence of strings to lowercase if case
         sensitivity is disabled, and strip characters contained in
         self._ignore_chars"""
-        for c in self._ignore_chars:
-            try:
-                s = s.replace(c, '')
-            except AttributeError:
-                s = [x.replace(c, '') for x in s]
-        if self._case_sensitive:
-            return s
         try:
-            return s.lower()
+            s.lower()
         except AttributeError:
-            return [x.lower() for x in s]
+            if self._case_sensitive:
+                s = [re.sub('[{}]'.format(self._ignore_chars), '', x) for x in s]
+            else:
+                s = [re.sub('[{}]'.format(self._ignore_chars), '', x).lower()
+                    for x in s]
+            return s
+        else:
+            if self._case_sensitive:
+                s = re.sub('[{}]'.format(self._ignore_chars), '', s)
+            else:
+                s = re.sub('[{}]'.format(self._ignore_chars), '', s).lower()
+            return s
 
     def adjust_left_line_breaks(self, string, max):
         """Limit newline characters in string to 'max' total, counting from end of
@@ -68,9 +73,10 @@ class Markov(object):
         return string
 
     def adjust_right_line_breaks(self, string, max):
-        """Limit newline characters in string to 'max' total, counting from start of
-        string forward; truncate any additional newlines and everything after
-        them. None for 'max' means unlimited (return string unchanged)."""
+        """Limit newline characters in string to 'max' total, counting from
+        start of string forward; truncate any additional newlines and
+        everything after them. None for 'max' means unlimited (return string
+        unchanged)."""
         if max is not None:
             return '\n'.join(string.split('\n')[0:max+1])
         return string
@@ -84,14 +90,22 @@ class Markov(object):
             word_key = self.conv_key(word)
             chain_value = chain[1:order+1]
             chain_key = tuple(self.conv_key(chain[:order]))
-            if not word_value in word_dict[word_key]:
-                l = word_dict[word_key]
-                l.append(word_value)
-                word_dict[word_key] = l
+            
+            # The explicit retrieval and storing of the dictionary (rather
+            # than operating on it in-place) is required in case the object
+            # is shelved
+            d = word_dict[word_key]
+            if not word_value in d:
+                d[word_value] = 1
+            else:
+                d[word_value] += 1
+            word_dict[word_key] = d
+            d = chain_dict[chain_key]
             if not chain_value in chain_dict[chain_key]:
-                l = chain_dict[chain_key]
-                l.append(chain_value)
-                chain_dict[chain_key] = l
+                d[chain_value] = 1
+            else:
+                d[chain_value] += 1
+            chain_dict[chain_key] = d
 
     def add(self, sentence):
         """Parse and add a string of words to the chain"""
@@ -106,18 +120,33 @@ class Markov(object):
         f = open(filename, 'r')
         for line in f:
             self.add(line)
+            
+    def choice(self, counter):
+        """Select a random element from Counter 'counter', weighted by the
+        elements' counts"""
+        if not counter:
+            raise IndexError('Counter object is empty')
+        total = sum(counter.values())
+        targetidx = randint(0, total)
+        currentidx = 0
+        for k in counter.keys():
+            currentidx += counter[k]
+            if currentidx >= targetidx:
+                return k
 
     def get_chain_forward(self, chain):
         """Select and return a chain from the given chain forward in context"""
         try:
-            return choice(self.chain_forward[tuple(self.conv_key(chain))])
+            return self.choice(
+                self.chain_forward[tuple(self.conv_key(chain))])
         except IndexError:
             return ()
 
     def get_chain_backward(self, chain):
         """Select and return a chain from the given chain backward in context"""
         try:
-            return choice(self.chain_backward[tuple(self.conv_key(chain))])
+            return self.choice(
+                self.chain_backward[tuple(self.conv_key(chain))])
         except IndexError:
             return ()
 
@@ -173,7 +202,7 @@ class Markov(object):
     def from_word_forward(self, word):
         """Generate a chain from the given word forward in context"""
         try:
-            chain = choice(self.word_forward[self.conv_key(word)])
+            chain = self.choice(self.word_forward[self.conv_key(word)])
         except IndexError:
             return ()
         return self.from_chain_forward(chain)
@@ -181,7 +210,7 @@ class Markov(object):
     def from_word_backward(self, word):
         """Generate a chain from the given word backward in context"""
         try:
-            chain = choice(self.word_backward[self.conv_key(word)])
+            chain = self.choice(self.word_backward[self.conv_key(word)])
         except IndexError:
             return ()
         return self.from_chain_backward(chain)
@@ -253,7 +282,7 @@ class Markov_Shelf(shelve.DbfilenameShelf):
         try:
             return shelve.Shelf.__getitem__(self, repr(key))
         except KeyError:
-            return []
+            return Counter()
 
     def __setitem__(self, key, value):
         shelve.Shelf.__setitem__(self, repr(key), value)
@@ -265,7 +294,7 @@ class Markov_Shelf(shelve.DbfilenameShelf):
         return [eval(x) for x in shelve.Shelf.keys(self)]
 
     def random_key(self):
-        return eval(choice(shelve.Shelf.keys(self)))
+        return choice(self.keys())
 
 
 class Markov_Shelved(Markov):

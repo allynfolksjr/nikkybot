@@ -21,14 +21,16 @@ from __future__ import print_function
 
 from collections import defaultdict
 
+import cPickle
 import random
 import re
+import subprocess
 import time
 import traceback
 import sys
 
 from twisted.words.protocols import irc
-from twisted.internet import reactor, protocol
+from twisted.internet import reactor, protocol, threads
 from twisted.internet.error import ConnectionDone
 from twisted.python import log
 
@@ -37,8 +39,10 @@ from nikkyai import NikkyAI
 
 
 RELOAD_INTERVAL = 60 * 60 * 24
+STATE_SAVE_INTERVAL = 900
+STATE_CLEANUP_INTERVAL = 60 * 60 * 24
 CHANNEL_CHECK_INTERVAL = 300
-
+MAX_USER_THREADS = 4
 
 class BotError(Exception):
     pass
@@ -94,6 +98,7 @@ class NikkyBot(irc.IRCClient):
         self.nikkies = self.factory.nikkies
         self.pending_responses = []
         self.joined_channels = set()
+        self.user_threads = 0
 
         irc.IRCClient.connectionMade(self)
 
@@ -101,6 +106,10 @@ class NikkyBot(irc.IRCClient):
             reactor.callLater(RELOAD_INTERVAL, self.auto_reload)
         if CHANNEL_CHECK_INTERVAL is not None:
             reactor.callLater(CHANNEL_CHECK_INTERVAL, self.channel_check)
+        if STATE_SAVE_INTERVAL is not None:
+            reactor.callLater(STATE_SAVE_INTERVAL, self.save_state)
+        if STATE_CLEANUP_INTERVAL is not None:
+            reactor.callLater(STATE_CLEANUP_INTERVAL, self.cleanup_state)
 
     def connectionLost(self, reason):
         print('Connection lost: {}'.format(reason))
@@ -117,6 +126,8 @@ class NikkyBot(irc.IRCClient):
     def privmsg(self, user, channel, msg):
         nick, host = user.split('!', 1)
         formatted_msg = '<{}> {}'.format(nick, msg)
+        
+        # !TODO! Clean up this mess. This is getting ridiculous.
 
         if channel == self.nickname:
             # Private message
@@ -124,13 +135,23 @@ class NikkyBot(irc.IRCClient):
                 try:
                     self.do_command(msg.strip(), nick)
                 except UnrecognizedCommandError:
-                    self.do_AI_reply(formatted_msg, nick, no_delay=True,
-                        log_response=False)
+                    try:
+                        self.do_guest_command(msg.strip(), nick)
+                    except UnrecognizedCommandError:
+                        self.do_AI_reply(formatted_msg, nick, no_delay=True,
+                                         log_response=False)
+                    else:
+                        print('Executed: {}'.format(msg.strip()))
                 else:
                     print('Executed: {}'.format(msg.strip()))
             else:
                 print('privmsg from {}: {}'.format(user, repr(msg)))
-                self.do_AI_reply(formatted_msg, nick, no_delay=True)
+                try:
+                    self.do_guest_command(msg.strip(), nick)
+                except UnrecognizedCommandError:
+                    self.do_AI_reply(formatted_msg, nick, no_delay=True)
+                else:
+                    print('Executed: {}'.format(msg.strip()))
         else:
             # Public message
             if self.hostmask_match('*!~saxjax@*', user):
@@ -141,10 +162,31 @@ class NikkyBot(irc.IRCClient):
                 else:
                     m = re.match(r'\(.\) \*(.*?) (.*)', msg)
                     if m:
-                        nick = m.group(1)
-                        formatted_msg = '<{}> {}'.format(nick, m.group(2))
+                        if m.group(1) != 'File':
+                            nick = m.group(1)
+                        else:
+                            nick = ''
+                        formatted_msg = '<> {} {}'.format(m.group(1),
+                                                          m.group(2))
             if self.is_highlight(msg):
-                self.do_AI_reply(formatted_msg, channel, log_response=False)
+                raw_msg = msg
+                for n in self.factory.nicks:
+                    m = re.match(r'^{}[:,]? (.*)'.format(re.escape(n)),
+                                 msg, flags=re.I)
+                    if m:
+                        raw_msg = m.group(1).strip()
+                        try:
+                            self.do_guest_command(raw_msg, nick,
+                                                  channel=channel)
+                        except UnrecognizedCommandError:
+                            self.do_AI_reply(formatted_msg, channel,
+                                             log_response=False)
+                        else:
+                            print('Executed: {}'.format(raw_msg.strip()))
+                        break
+                else:
+                    self.do_AI_reply(formatted_msg, channel,
+                                     log_response=False)
             else:
                 self.do_AI_maybe_reply(formatted_msg, channel, log_response=False)
 
@@ -249,6 +291,57 @@ class NikkyBot(irc.IRCClient):
                 self.notice(nick, 'Error: {}'.format(e))
         else:
             raise UnrecognizedCommandError
+        
+    def return_bot_chat(self, t):
+        nick, channel, output = t
+        if channel is not None:
+            self.output_timed_msg(channel,
+                                  '{}: Botchat result: {}'.format(nick, output))
+        else:
+            self.output_timed_msg(nick, 'Botchat result: {}'.format(output))
+        print('return_bot_chat: Reporting botchat completion: {}'.format(output))
+        self.user_threads -= 1
+        assert(self.user_threads >= 0)
+    
+    def exec_bot_chat(self, nick, channel, nick1, nick2):
+        self.user_threads += 1
+        out = subprocess.check_output(['./bot-chat', nick1, nick2])
+        assert(out.count('\n') <= 2)
+        return nick, channel, out
+    
+    def bot_chat_error(self, failure, nick):
+        reactor.callLater(2, self.notice, nick,
+                          'Sorry, something went wrong. Tell tev!')
+        self.user_threads -= 1
+        assert(self.user_threads >= 0)
+        return failure
+        
+    def do_guest_command(self, cmd, nick, channel=None):
+        """Execute a special/non-admin command"""
+        if cmd.lower().startswith('?botchat'):
+            from markovmixai import get_personalities
+            personalities = ['nikkybot'] + get_personalities()
+            usage_msg1 = 'Usage: ?botchat personality1 personality2'
+            usage_msg2 = 'Personalities: {}'.format(
+                            ', '.join(sorted(personalities)))
+            parms = cmd.split(' ')[1:]  #Excluding '?botchat' itself
+            if (len(parms) != 2 or parms[0] not in personalities or
+                    parms[1] not in personalities):
+                reactor.callLater(2, self.notice, nick, usage_msg1)
+                reactor.callLater(4, self.notice, nick, usage_msg2)
+            else:
+                if self.user_threads >= MAX_USER_THREADS:
+                    reactor.callLater(2, self.notice, nick,
+                                      "Sorry, I'm too busy at the moment. Please try again later!")
+                else:
+                    reactor.callLater(2, self.notice, nick,
+                                    "Generating the bot chat may take a while... I'll let you know when it's done!")
+                    d = threads.deferToThread(self.exec_bot_chat, nick, channel,
+                                            parms[0], parms[1])
+                    d.addErrback(self.bot_chat_error, nick)
+                    d.addCallback(self.return_bot_chat)
+        else:
+            raise UnrecognizedCommandError
     
     def do_AI_reply(self, msg, target, silent_errors=False, log_response=True,
             no_delay=False):
@@ -326,10 +419,11 @@ class NikkyBot(irc.IRCClient):
             self.nikkies[k] = NikkyAI()
             self.nikkies[k].last_replies = last_replies
             self.nikkies[k].nick = self.nickname
+            self.nikkies[k].load_preferred_keywords()
 
     def auto_reload(self):
-        """Automatically reload AI module on intervals (to update regularly-updated
-        Markov data by another process, for instance)"""
+        """Automatically reload AI module on intervals (to update regularly
+        updated Markov data by another process, for instance)"""
         self.reload_ai()
         reactor.callLater(RELOAD_INTERVAL, self.auto_reload)
 
@@ -339,6 +433,16 @@ class NikkyBot(irc.IRCClient):
         for c in self.factory.channels:
             if c not in self.joined_channels:
                 self.join(c)
+                
+    def save_state(self):
+        """Save nikkyAI state to disk file"""
+        self.factory.save_state()
+        reactor.callLater(STATE_SAVE_INTERVAL, self.save_state)
+        
+    def cleanup_state(self):
+        """Clean up any stale state data to reduce memory and disk usage"""
+        self.factory.cleanup_state()
+        reactor.callLater(STATE_CLEANUP_INTERVAL, self.cleanup_state)
 
 
 class NikkyBotFactory(protocol.ReconnectingClientFactory):
@@ -348,10 +452,12 @@ class NikkyBotFactory(protocol.ReconnectingClientFactory):
     def __init__(self, servers, channels, nicks, real_name=REAL_NAME,
                  admin_hostmasks=ADMIN_HOSTMASKS,
                  client_version=CLIENT_VERSION,
+                 reconnect_wait=RECONNECT_WAIT,
                  min_send_time=MIN_SEND_TIME,
                  nick_retry_wait=NICK_RETRY_WAIT,
                  initial_reply_delay=INITIAL_REPLY_DELAY,
-                 simulated_typing_speed=SIMULATED_TYPING_SPEED):
+                 simulated_typing_speed=SIMULATED_TYPING_SPEED,
+                 state_filename=STATE_FILE):
         self.servers = servers
         self.channels = channels
         self.nicks = nicks
@@ -359,17 +465,71 @@ class NikkyBotFactory(protocol.ReconnectingClientFactory):
         self.admin_hostmasks = admin_hostmasks
         self.client_version = client_version
         self.initial_reply_delay = initial_reply_delay
+        self.reconnect_wait = reconnect_wait
         self.min_send_time = min_send_time
         self.nick_retry_wait = nick_retry_wait
         self.simulated_typing_speed = simulated_typing_speed
+        self.state_filename = state_filename
         
         self.shut_down = False
         
         self.nikkies = defaultdict(NikkyAI)
+        self.load_state()
+        
+    def load_state(self):
+        """Attempt to load persistent state data; else start with new
+        defaults"""
+        try:
+            f = open(self.state_filename, 'rb')
+        except IOError as e:
+            print("Couldn't open state data file for reading: {}".format(e))
+        else:
+            try:
+                state = cPickle.load(f)
+            except Exception as e:
+                print("Couldn't load state data: {}".format(e))
+            else:
+                for k in state:
+                    try:
+                        nikky = self.nikkies[k]
+                    except KeyError:
+                        pass
+                    else:
+                        nikky.last_replies = state[k]['last_replies']
+                        try:
+                            nikky.load_preferred_keywords()
+                        except Exception as e:
+                            print("Couldn't load preferred keyword patterns: {}".format(e))
+                print("Loaded state data")
+                
+    def save_state(self):
+        """Save persistent state data"""
+        try:
+            f = open(self.state_filename, 'wb')
+        except IOError as e:
+            print("Couldn't open state data file for writing: {}".format(e))
+        else:
+            state = {}
+            for k in self.nikkies:
+                state[k] = {'last_replies': self.nikkies[k].last_replies}
+            try:
+                cPickle.dump(state, f)
+            except Exception as e:
+                print("Couldn't save state data: {}".format(e))
+            else:
+                print("Saved state data")
+                
+    def cleanup_state(self):
+        """Clean up any stale state data to reduce memory and disk usage"""
+        for k in self.nikkies:
+            print('Starting state cleanup for {}'.format(repr(k)))
+            self.nikkies[k].clean_up_last_replies()
 
     def clientConnectionFailed(self, connector, reason):
         print('Connection failed: {}'.format(reason))
         url, port = random.choice(self.servers)
+        print('Waiting {} seconds'.format(self.reconnect_wait))
+        time.sleep(self.reconnect_wait)
         print('Connecting to {}:{}'.format(url, port))
         reactor.connectTCP(url, port,
             NikkyBotFactory(self.servers, self.channels, self.nicks,
@@ -377,12 +537,11 @@ class NikkyBotFactory(protocol.ReconnectingClientFactory):
                 self.nick_retry_wait, self.simulated_typing_speed))
                 
     def clientConnectionLost(self, connector, reason):
+        self.save_state()
         if self.shut_down:
             reactor.stop()
         else:
             self.clientConnectionFailed(connector, reason)
-            #protocol.ReconnectingClientFactory.clientConnectionLost(
-            #    self, connector, reason)
 
 
 if __name__ == '__main__':

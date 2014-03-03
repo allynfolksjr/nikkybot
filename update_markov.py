@@ -3,9 +3,9 @@
 ### IMPORTANT:
 # This script will need to be modified to grab the desired lines from whatever
 # IRC logs are on hand.  (Mine are all disorganized and in several different
-# formats, so this script is longer and more convulted than would probably
-# normally be necessary.)  They will be saved to 'nikkybot.trn' and then fed to
-# the Markov generator.
+# formats, so this script is longer and more convoluted than would probably
+# normally be necessary.)  The lines will be fed to the Markov generator and
+# saved in database files under markov/
 
 import os
 import re
@@ -109,6 +109,17 @@ with open('misc_irc_lines.txt', 'r') as f:
                 training_glob.append('\n'.join(line_group))
             line_group = []
 
+# And some stuff from elsewhere, too!
+with open('manually-added.txt', 'r') as f:
+    line_group = []
+    for line in f:
+        line = line.strip()
+        if re.match(r'(.+)', line, re.I):
+            line_group.append(line)
+        else:
+            if line_group:
+                training_glob.append('\n'.join(line_group))
+            line_group = []
 
 # There, that's all I have
 #   ...I think...
