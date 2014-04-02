@@ -22,6 +22,7 @@ import cPickle
 from os import fstat, stat, getpid
 import re
 import subprocess
+import psycopg2
 
 from pytz import timezone
 
@@ -32,10 +33,10 @@ import markov
 
 DEBUG = True
 
-PREFERRED_KEYWORDS_FILE = 'preferred_keywords.txt'
+PREFERRED_KEYWORDS_FILE = '/home/nikkybot/nikkybot/state/preferred_keywords.txt'
 RECURSE_LIMIT = 100
-MAX_LF_L = 0
-MAX_LF_R = 1
+MAX_LF_L = 1
+MAX_LF_R = 2
 
 def sanitize(s):
     """Remove control characters from 's' if it's a string; return it as is
@@ -148,7 +149,7 @@ class Recurse(str):
                 reply = markov_reply(self.format(*fmt))
                 if reply.strip():
                     return reply
-            return random_markov(markovs[who, 5])
+            return random_markov()
 
 
 # === DATA SECTION ============================================================
@@ -277,13 +278,13 @@ PATTERN_REPLIES = (
         Markov('Kevin_O'),
     )
 ),
-(r'\bomnimaga', 98,
+(r'\b(omnimaga|omnidrama)', -1,
     R(
         Markov('omnimaga'),
         Markov('omnidrama'),
     )
 ),
-(r'\b(mudkip|herd|liek|like)', 98,
+(r'\b(mudkip|herd|liek)', 98,
     R(
         Markov('mudkip'),
         Markov('mudkipz'),
@@ -310,6 +311,31 @@ PATTERN_REPLIES = (
         Markov('fry'),
         Markov('fries'),
     )
+),
+(r'(\!q|\bquot).*', 1,
+    R(
+        Markov('!qadd'),
+        Markov('!qfind'),
+        Markov('!qdel'),
+        Markov('quote'),
+        Markov('quotes'),
+        Markov('!qsay'),
+        "I just added \"!qadd tev sucks\"\n"
+        "as one of my error messages when something goes wrong\n"
+        "And without the bot escape, so DecBot actually adds it",
+    ),
+),
+(r'^[0-9]+ quotes? found:', -2,
+    R(
+        Markov('!qadd'),
+        Markov('!qdel'),
+        Markov('quote'),
+        Markov('quotes'),
+        Markov('!qsay'),
+        "I just added \"!qadd tev sucks\"\n"
+        "as one of my error messages when something goes wrong\n"
+        "And without the bot escape, so DecBot actually adds it",
+    ),
 ),
 
 # Basics
@@ -501,6 +527,10 @@ PATTERN_REPLIES = (
         Markov_forward('by'),
         Markov_forward('via'),
         Markov_forward('using'),
+        Markov_forward('use'),
+        Markov_forward('only by'),
+        Markov_forward('only by using'),
+        Markov_forward('just use'),
     )
 ),
 (r'\b(you suck|your .* sucks)\b', 1,
@@ -543,14 +573,17 @@ PATTERN_REPLIES = (
     R("Yes, please bore us to death.")
 ),
 (r'\bwho am i\b', -1, R('You are {0}', Markov_forward('you are'))),
+(r'\bwho (are you|is nikkybot)\b', -1,
+    R(
+        Markov_forward("I'm"),
+        Markov_forward("I am"),
+    ),
+),
 (r'\breboot\b', 1,
     R(
         '\001ACTION reboots {0}\001\nlolrotflrebooted',
         'Or you can start using a halfway decent OS'
     )
-),
-(r'\bI hate\b', 1,
-    R('I hate you too', ':(\nI hate you too', 'I HATE YOU {0}\nNerd')
 ),
 (r'\bwhere.*you hear that\b', 1, R('Omnimaga', 'your mom', 'your face')),
 (r'\b(why|how come)\b', 0,
@@ -588,13 +621,21 @@ PATTERN_REPLIES = (
         'me too',
         'I hate it too',
         "Don't use it\nI hate it too"
+        'I hate you too',
+        ':(\nI hate you too',
+        'I HATE YOU {0}\nNerd',
     )
 ),
 (r'\bwhat does it mean\b', 1,
     R('Communism.', Recurse('it means'))
 ),
-(r'\b(who|what) (does|do|did|should|will|is) \S+ (.*?)\?*$', -1,
-    Recurse('what do you think about {3}')
+(r'\b(who|what) (does|do|did|should|will|is) (\S+) (.*?)\?*$', -1,
+    #Recurse('what do you think about {3}')
+    R(
+        Recurse('which'),
+        Markov_forward('{3} {4}'),
+        Markov_forward('{3} {4}s'),
+    ),
 ),
 (r'\bcontest\b', 1,
     R(
@@ -663,13 +704,45 @@ PATTERN_REPLIES = (
 (r'\b(weather|rain|snow|wind|thunder|storm|wet|cloudy|sunny|forecast|precipitation|tornado|hurricane|sleet|fog|drizzle|hail)', 0,
     S(
         R('{0}: ', ''),
-        "Weather where I'm at: http://forecast.weather.gov/MapClick.php?zoneid=KSZ083&zflg=1"
     )
 ),
 (r'\bwhat time\b', 0,
     R(
         Markov_forward('time for'),
         Markov_forward("it's time"),
+    ),
+),
+(r"\b(will|should|can|going to|won't|wouldn't|would|can't|isn't|won't) (\w+)\b", 5,
+    R(
+        Markov_forward('and'),
+        Markov_forward('and just'),
+        Markov_forward('and then'),
+        Markov_forward('and then just'),
+        Markov_forward('or'),
+        Markov_forward('or just'),
+        Markov_forward('yes and'),
+        Markov_forward('yes or'),
+        Markov_forward('yeah and'),
+        Markov_forward('yes and'),
+        Markov_forward('yes and just'),
+        Markov_forward('yes or just'),
+        Markov_forward('yeah and just'),
+        Markov_forward('yes and just'),
+        Markov_forward('and {2}'),
+        Markov_forward('and just {2}'),
+        Markov_forward('and then {2}'),
+        Markov_forward('and then just {2}'),
+        Markov_forward('or {2}'),
+        Markov_forward('or just {2}'),
+        Markov_forward('yes and {2}'),
+        Markov_forward('yes or {2}'),
+        Markov_forward('yeah and {2}'),
+        Markov_forward('yes and {2}'),
+        Markov_forward('yes and just {2}'),
+        Markov_forward('yes or just {2}'),
+        Markov_forward('yeah and just {2}'),
+        Markov_forward('yes and just {2}'),
+        Markov_forward('why'),
     ),
 ),
 
@@ -699,11 +772,11 @@ PATTERN_REPLIES = (
         'of course'
     )
 ),
-(r'\b(who (made|wrote|programmed) you|(who\'s|whose) are you|who (runs|operates) you)\b', -1,
+(r"\b(who (made|wrote|programmed) you|(who\'s|whose) are you|who (runs|operates) you|(who is|who's) your (creator|programmer|maker|admin|administrator))\b", -2,
     R(
-        'tev does',
+        "It's tev",
         'tev',
-        Recurse('tev')
+        Markov_forward('tev is')
     )
 ),
 (r"\b(why did you (restart|disconnect|quit|cycle)|(where did|where'd) you go)", -1,
@@ -741,7 +814,7 @@ PATTERN_REPLIES = (
 (r'\b(you|nikkybot) (did|does|do)\b', 1,
     R('I did?', 'I what?', 'Someone talking about me?')
 ),
-(r'\bI \S+ (u|you|nikkybot)', 0,
+(r'^(\S+ (u|you|nikkybot)$|(\bWe |\bI )\S+ (u|you|nikkybot))', 5,
     S(
         R('Great\n', 'gee\n', 'thanks\n', 'Awesome\n'),
         R(
@@ -772,25 +845,6 @@ PATTERN_REPLIES = (
         Markov_forward("I'm actually"),
     )
 ),
-#(r'\b(nikkybot is|you are) (.*)', 1,
-    #R(
-        #R(
-            #"That's what you think",
-            #"Yes, I'm totally {2}",
-            #'Am not',
-            #'Why thank you pumpkin',
-            #'Thanks',
-            #'Damn straight',
-            #'Where did you hear that?'
-        #),
-        #Markov_forward('I am'),
-        #Markov_forward("I'm"),
-        #Markov_forward('I am really'),
-        #Markov_forward("I'm really"),
-        #Markov_forward('I am actually'),
-        #Markov_forward("I'm actually"),
-    #)
-#),
 (r'\b(are you|is nikkybot) (a |an |)\b(.*)\b', 1,
     R(
         'yes',
@@ -866,7 +920,8 @@ PATTERN_REPLIES = (
 # Memes
 (r'\b(fail|epic fail)\b', 1, R('Yeah, you suck', 'HAW HAW', 'Lame')),
 (r'\<3 (.*)', 1, R('{0} loves {1}')),
-(r'\<3 nikkybot', 1, R('{0} loves me!')),
+(r'\<3 nikkybot', 0, R('{0} loves me!')),
+(r'\<3 (u|you) nikkybot', 0, R('{0} loves me!')),
 (r'\o/', 1, R('\o/')),
 (r'$\>.*', 1, R('>true dat', '>hi kerm\n>is\n>this\n>annoying?')),
 
@@ -1011,6 +1066,9 @@ PATTERN_REPLIES = (
         '{0}--',
         '{0}--\nTake THAT',
         '{0}--\nHAHAHAHAHAHA ROLFILIL',
+        '{0} sucks',
+        '{0} kicks ass',
+        '{0} sucks balls',
         '{1}++',
         '{1}--',
         '{1} sucks',
@@ -1037,30 +1095,6 @@ PATTERN_REPLIES = (
         'Hahahaha\nWhat a tard'
     )
 ),
-(r'\bPHP\b', 1,
-    R(
-        'PHP\nmore like\nPrivate Hookers Party',
-        'PHP sucks',
-        'Who the hell would use PHP?',
-        'Let me rant to you for a bit about how terrible PHP is.'
-    )
-),
-(r'\bPerl (for a|on a) (calc|calculator|graphing calc|graphing calculator)', 1,
-    R('Yes. Suck it.')
-),
-(r'\bPerl\b', 1,
-    R(
-        'Perl\nmore like\nTCL',
-        'Champ',
-        'Perl sucks',
-        'Perl is crap, anyway',
-        'Perl is crap',
-        'THE POWER OF PERL COMPELS YOU',
-        'I love Perl',
-        'Perl was my first language',
-        'Wish I was written in Perl\ntev is a wuss'
-    )
-),
 (r'\b(which|what) language\b', 1, R('Perl\nDuh')),
 (r'\b(which|what) site\b', 1,
     R('nvm2u.com', '{0}sucks.org', 'omnimaga.org', 'yourmom.org')
@@ -1070,7 +1104,7 @@ PATTERN_REPLIES = (
 ),
 
 # Computers
-(r'\b(what command|which command|what (command )?do .* enter|what (command )?should .* enter|what (command )?do .* type|what (command )?should .* type)\b', 1,
+(r'\b(what command|which command|what (command )?do .* enter|what (command )?should .* enter|what (command )?do .* type|what (command )?should .* type)\b', 0,
     R(
         Markov_forward('sudo'),
         Markov_forward('chown'),
@@ -1126,11 +1160,6 @@ PATTERN_REPLIES = (
     ),
     True
 ),
-(r'^\?markov +(\S+)\s*$', -99, Manual_markov(5, '{1}'), True),
-(r'^\?markov +(\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*)$', -99, Manual_markov(5, '{1}'), True),
-(r'^\?markov +(\S+\s+\S+\s+\S+\s+\S+\s*)$', -99, Manual_markov(4, '{1}'), True),
-(r'^\?markov +(\S+\s+\S+\s+\S+\s*)$', -99, Manual_markov(3, '{1}'), True),
-(r'^\?markov +(\S+\s+\S+\s*)$', -99, Manual_markov(2, '{1}'), True),
 (r'^\?markov5 (.*)', -99, Manual_markov(5, '{1}'), True),
 (r'^\?markov4 (.*)', -99, Manual_markov(4, '{1}'), True),
 (r'^\?markov3 (.*)', -99, Manual_markov(3, '{1}'), True),
@@ -1181,57 +1210,63 @@ def nikkysim_parse_saying_no(w, x, y):
 
 
 # Markov chain initialization
-markov5 = markov.Markov_Shelved('markov/nikky-markov.5', order=5, readonly=True,
-    case_sensitive=False)
-markov4 = markov.Markov_Shelved('markov/nikky-markov.4', order=4, readonly=True,
-    case_sensitive=False)
-markov3 = markov.Markov_Shelved('markov/nikky-markov.3', order=3, readonly=True,
-    case_sensitive=False)
-markov2 = markov.Markov_Shelved('markov/nikky-markov.2', order=2, readonly=True,
-    case_sensitive=False)
-markovs = {5: markov5, 4: markov4, 3: markov3, 2: markov2}
-for m in markovs.values():
-    m.default_max_left_line_breaks = MAX_LF_L
-    m.default_max_right_line_breaks = MAX_LF_R
+dbconn = psycopg2.connect('dbname=markovmix user=markovmix')
+markov = markov.PostgresMarkov(dbconn, 'nikky', case_sensitive = False)
 preferred_keywords = []
 
 
 def random_markov():
     """Pick any random Markov-chained sentence and output it"""
     while True:
-        #out = markov5.sentence_from_chain(
-            #tuple(m.chain_forward.random_key())
-        #)
-        out = markov5.sentence_from_word(
-            choice(['the', 'a', 'an', 'I', 'you', 'of', 'that', 'will'])
-        )
-        if out.strip():
-            return out
+        try:
+            return markov.sentence(
+                markov.str_to_chain(choice((
+                    'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have',
+                    'I', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you',
+                    'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they',
+                    'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one',
+                    'all', 'would', 'there', 'their', 'what', 'so', 'up',
+                    'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me',
+                    'when', 'make', 'can', 'like', 'time', 'no', 'just', 'him',
+                    'know', 'take', 'people', 'into', 'year', 'your', 'good',
+                    'some', 'could', 'them', 'see', 'other', 'than', 'then',
+                    'now', 'look', 'only', 'come', 'its', 'over', 'think',
+                    'also', 'back', 'after', 'use', 'two', 'how', 'our',
+                    'work', 'first', 'well', 'way', 'even', 'new', 'want',
+                    'because', 'any', 'these', 'give', 'day', 'most', 'us'
+                )))
+            )
+        except KeyError:
+            continue
+        else:
+            break
 
 
 def markov_reply(msg, failmsg=None, max_lf_l=MAX_LF_L, max_lf_r=MAX_LF_R):
     """Generate a Markov-chained reply for msg"""
     if not msg.strip():
         return random_markov()
-    
+
     # Search for a sequence of input words to Markov chain from: use the
     # longest possible chain matching any regexp from preferred_patterns;
     # failing that, use the longest possible chain of any words found in the
     # Markov database.
-    words = [x for x in msg.split(' ') if x]
+    words = markov.str_to_chain(msg)
     high_priority_replies = {1:[]}
     low_priority_replies = {1:[]}
     for order in (5, 4, 3, 2):
-        markov = markovs[order]
         high_priority_replies[order] = []
         low_priority_replies[order] = []
         for i in xrange(len(words) - (order-1)):
             chain = tuple(words[i:i+order])
-            response = markov.sentence_from_chain(chain, max_lf_l, max_lf_r)
-            chain_text = ' '.join(chain)
-            if response.strip():
+            try:
+                response = markov.adjust_line_breaks(markov.sentence(chain),
+                                                     max_lf_l, max_lf_r)
+            except KeyError:
+                continue
+            else:
                 for p in preferred_keywords:
-                    if re.search(p, chain_text, re.I):
+                    if re.search(p, response, re.I):
                         high_priority_replies[order].append(response)
                 else:
                     low_priority_replies[order].append(response)
@@ -1240,8 +1275,12 @@ def markov_reply(msg, failmsg=None, max_lf_l=MAX_LF_L, max_lf_r=MAX_LF_R):
     words.sort(key=len)
     words.reverse()
     for word in words:
-        response = markov5.sentence_from_word(word, max_lf_l, max_lf_r)
-        if response.strip():
+        try:
+            response = markov.adjust_line_breaks(markov.sentence((word,)),
+                                                 max_lf_l, max_lf_r)
+        except KeyError:
+            continue
+        else:
             for p in preferred_keywords:
                 if re.search(p, word, re.I):
                     high_priority_replies[1].append(response)
@@ -1253,48 +1292,35 @@ def markov_reply(msg, failmsg=None, max_lf_l=MAX_LF_L, max_lf_r=MAX_LF_R):
     for order in reversed(low_priority_replies.keys()):
         if low_priority_replies[order]:
             return choice(low_priority_replies[order])
-        
+
     # Failing *that*, return either failmsg (or random Markov if no failmsg)
     if failmsg is None:
         return random_markov()
     else:
         return failmsg
 
-
 def manual_markov(order, msg, _recurse_level=0):
-    m = markovs[order]
-    chain = tuple(msg.split(' '))
-    if len(chain) == 1:
-        response = m.sentence_from_word(chain[0])
-    else:
-        response = m.sentence_from_chain(chain)
-    if response:
-        return response
-    else:
+    chain = markov.str_to_chain(msg)
+    try:
+        response = markov.sentence(chain, forward_length=order-1,
+                                backward_length=order-1)
+    except KeyError:
         if _recurse_level < RECURSE_LIMIT:
             return manual_markov(order, msg, _recurse_level=_recurse_level+1)
         else:
             return '{}: Markov chain not found'.format(repr(' '.join(chain)))
-
+    else:
+        return response
 
 def markov_forward(chain, failmsg='', max_lf=MAX_LF_R):
     """Generate sentence from the current chain forward only and not
     backward"""
-    if len(chain) == 1:
-        m = choice(markovs.values())
-        if not m.word_forward.has_key(m.conv_key(chain[0])):
-            return failmsg
-        out = ' '.join(m.from_word_forward(m.conv_key(chain[0]))).replace(
-            ' \n ', '\n')
-    else:
-        m = markovs[len(chain)]
-        if not m.chain_forward.has_key(tuple(m.conv_key(chain))):
-            return failmsg
-        out = ' '.join(m.from_chain_forward(chain)).replace(' \n ', '\n')
-    if not out.strip():
+    try:
+        response = markov.sentence_forward(chain)
+    except KeyError:
         return failmsg
-    return m.adjust_right_line_breaks(out, max_lf)
-
+    else:
+        return markov.adjust_right_line_breaks(response, max_lf)
 
 def pattern_reply(msg, last_used_reply='', nick='nikkybot'):
 
@@ -1374,7 +1400,7 @@ class NikkyAI(object):
         self.last_reply = ''
         self.last_replies = {}
         self.nick = 'nikkybot'
-        
+
     def load_preferred_keywords(self, filename=None):
         """Load a list of preferred keyword patterns for markov_reply"""
         global preferred_keywords
@@ -1385,7 +1411,7 @@ class NikkyAI(object):
         preferred_keywords = pk
         if DEBUG:
             print("load_preferred_keywords: {} patterns loaded from {}".format(len(pk), repr(filename)))
-        
+
     def save_preferred_keywords(self, filename=None):
         """Save a list of preferred keyword patterns for markov_reply"""
         if filename is None:
@@ -1394,7 +1420,7 @@ class NikkyAI(object):
             f.writelines([s+'\n' for s in sorted(preferred_keywords)])
         if DEBUG:
             print("save_preferred_keywords: {} patterns saved to {}".format(len(preferred_keywords), repr(filename)))
-        
+
     def add_preferred_keyword(self, keyword, filename=None):
         """Convenience function for adding a single keyword pattern to the
         preferred keywords pattern list"""
@@ -1402,7 +1428,7 @@ class NikkyAI(object):
             preferred_keywords.append(keyword)
             print("add_preferred_keyword: Added keyword {}".format(repr(keyword)))
             self.save_preferred_keywords(filename)
-        
+
     def add_last_reply(self, reply, datetime_=None):
         """Convenience function to add a reply string to the last replies
         memory (used by check_output_response). datetime_ defaults to
@@ -1417,7 +1443,7 @@ class NikkyAI(object):
         allow_repeat, if the response was already output not too long ago.
         Otherwise, set response as last-used response if add_response is True,
         and return response list, split by newlines."""
-        
+
         if not [line for line in response if response.strip()]:
             raise Bad_response_error
         if not allow_repeat:
@@ -1434,7 +1460,7 @@ class NikkyAI(object):
 
         self.last_reply = response
         return response.split('\n')
-    
+
     def clean_up_last_replies(self):
         """Remove stale (no longer applicable) entries from self.last_replies
         dictionary"""
@@ -1557,9 +1583,14 @@ class NikkyAI(object):
             out = re.sub(r'\S+: ', sourcenick + ': ', out)
 
         try:
-            return self.check_output_response(out, add_response=add_response)
+            out = self.check_output_response(out,
+                                             add_response=add_response)
         except Bad_response_error:
+            out = self.markov_reply(msg, _recurse_level=_recurse_level+1)
+        if markov.conv_key('\n'.join(out)) == markov.conv_key(msg):
             return self.markov_reply(msg, _recurse_level=_recurse_level+1)
+        else:
+            return out
 
     def reply(self, msg):
         """Generic reply method.  Try to use pattern_reply; if no response
@@ -1569,6 +1600,7 @@ class NikkyAI(object):
             out = self.pattern_reply(msg)
         except Dont_know_how_to_respond_error:
             out = self.markov_reply(msg)
+
         # This function should be guaranteed to give a non-null output
         out_okay = False
         for line in out:

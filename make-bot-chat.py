@@ -10,9 +10,13 @@ from time import sleep
 
 NUMBER_OF_ROUNDS = 50
 nikkyai.DEBUG = False
-nikkyai.RECURSE_LIMIT = 333
+nikkyai.RECURSE_LIMIT = 10
+nikkyai.MAX_LF_L = 10
+nikkyai.MAX_LF_R = 10
 markovmixai.DEBUG = False
-markovmixai.RECURSE_LIMIT = 333
+markovmixai.RECURSE_LIMIT = 10
+markovmixai.MAX_LF_L = 10
+markovmixai.MAX_LF_R = 10
 
 def usage_exit():
     print('Usage: {} personality1 personality2'.format(argv[0]))
@@ -20,14 +24,14 @@ def usage_exit():
     print(', '.join(['nikkybot'] + sorted(personalities)))
     exit(1)
 
-personalities = markovmixai.get_personalities()
+personalities = markovmixai.PERSONALITIES
 
 if len(argv) != 3:
     usage_exit()
 nick1, nick2 = argv[1], argv[2]
-if nick1 != 'nikkybot' and nick1 not in personalities:
+if nick1 not in ('nikkybot', 'nikky') and nick1 not in personalities:
     usage_exit()
-elif nick2 != 'nikkybot' and nick2 not in personalities:
+elif nick2 not in ('nikkybot', 'nikky') and nick2 not in personalities:
     usage_exit()
     
 if nick1 == nick2:
@@ -45,11 +49,11 @@ tw = textwrap.TextWrapper(subsequent_indent=' '*20, expand_tabs=True, width=80)
 def get_response(nick, target_nick, msg):
     if isinstance(msg, list):
         msg = '\n'.join(msg)
-    msg = '<' + target_nick + '> ' + msg
-    if nick == 'nikkybot':
+    if nick in ('nikky', 'nikkybot'):
+        msg = '<' + target_nick + '> ' + msg
         reply = nikkybot.reply(msg)
     else:
-        reply = markovmix.reply('?' + nick + ' ' + msg)
+        reply = markovmix.reply('<' + target_nick + '> ?' + nick + ' ' + msg)
         reply = [line.replace('<' + nick + '> ', '', 1) for line in reply]
     if not isinstance(reply, list):
         reply = [reply]
@@ -63,7 +67,7 @@ def format_response(nick, msg, tag=None):
     if tag is not None:
         display_nick = display_nick + '-' + tag
     tw.initial_indent='{:<20}'.format('<' + display_nick + '>')
-    msg = [tw.fill(p) for p in msg]
+    msg = [tw.fill(unicode(p, 'utf-8', errors='replace')) for p in msg]
     msg = '\n'.join(msg)
     return msg
 
